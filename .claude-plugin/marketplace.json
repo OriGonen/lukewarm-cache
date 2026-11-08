@@ -1,0 +1,11 @@
+{
+  "name": "lukewarm-cache",
+  "owner": { "name": "Lukewarm Cache" },
+  "plugins": [
+    {
+      "name": "lukewarm-cache",
+      "source": "./",
+      "description": "A small prompt-cache countdown with a per-session keep-warm toggle that pokes before the cache expires."
+    }
+  ]
+}
