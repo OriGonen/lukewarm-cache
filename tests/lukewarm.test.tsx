@@ -131,9 +131,10 @@ async function toggleLabel(ui: any): Promise<string | undefined> {
   return (await ui.find({ key: 'toggle' }))?.props.label
 }
 
-// The words beside the desktop's dot
+// The desktop's toggle is its words, spelled with baseline look-alikes: read them back as plain letters
+const PLAIN: Record<string, string> = { 'ɢ': 'g', 'ᴘ': 'p', 'ʏ': 'y' }
 async function statusOf(ui: any): Promise<string | undefined> {
-  return textOf(ui, /keep warm|^poke|^compact|^stopped|^turn running|^usage high|^waits for/)
+  return (await toggleLabel(ui))?.replace(/[ɢᴘʏ]/g, (letter) => PLAIN[letter]!)
 }
 
 // A short countdown, a first real reply, and the toggle pressed
@@ -167,7 +168,7 @@ describe('lukewarm-cache', () => {
     for (const surface of SURFACES) {
       const ui = await rowOn($, surface)
       const toggle = await ui.find({ key: 'toggle' })
-      expect(toggle?.props.label).toBe(surface === 'desktop' ? '○' : 'keep warm?')
+      expect(toggle?.props.label).toBe(surface === 'desktop' ? 'keeᴘ warm?' : 'keep warm?')
       expect(toggle?.props.dimColor).toBe(true)
       await ui.unmount()
       expect(await underLineOn(w, $, surface)).toBeUndefined()
@@ -194,16 +195,20 @@ describe('lukewarm-cache', () => {
     await above.unmount()
   })
 
-  test('every footer button fits the bubble: a dot, and letters on the baseline', async ($, on) => {
+  test('every footer button fits the bubble: letters on the baseline, the words are the switch', async ($, on) => {
     world(on)
     await warmedUp($)
     const ui = await footer($)
-    expect(await toggleLabel(ui)).toBe('●')
+    const toggle = (await toggleLabel(ui)) ?? ''
+    expect(toggle).toMatch(/^ᴘoke in /)
+    expect(toggle).not.toMatch(/[gjpqy]/)
+    const mark = await ui.find({ type: 'Text', text: /^●$/ })
+    expect(mark?.props.color).toBe('error')
     const edit = (await ui.find({ key: 'edit' }))?.props.label
     expect(edit).toBe('edit ᴘoke')
     expect(edit).not.toMatch(/[gjpqy]/)
     await ui.press({ key: 'toggle' })
-    expect(await toggleLabel(ui)).toBe('○')
+    expect(await toggleLabel(ui)).toBe('keeᴘ warm?')
     await ui.unmount()
   })
 
@@ -295,12 +300,11 @@ describe('lukewarm-cache', () => {
     expect(await underLineOn(w, $, 'terminal')).toBe(`sends "${POKE}"`)
     const desktop = await footer($)
     expect(await statusOf(desktop)).toBe('poke in 0:42*')
-    expect((await desktop.find({ type: 'Text', text: /^poke in/ }))?.props.color).toBe('success')
     await desktop.unmount()
     expect(await underLineOn(w, $, 'desktop')).toBe(`sends "${POKE}"`)
   })
 
-  test('on: the dot is the off switch, and the message line clears', async ($, on) => {
+  test('on: the words are the off switch, and the message line clears', async ($, on) => {
     const w = world(on)
     await warmedUp($)
     expect(await underLineOn(w, $, 'desktop')).toBe(`sends "${POKE}"`)

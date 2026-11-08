@@ -143,8 +143,8 @@ function hasToggle(keep: Keep, r: Readout): boolean {
 }
 
 // The desktop's row. A footer button is a bubble one letter tall, always in the
-// app's own color, so the switch is a dot that fits inside it and the words sit
-// beside it as plain text. The footer holds about 24 characters: with keep-warm
+// app's own color, so the words themselves are the switch, spelled with letters
+// that sit on the baseline. The footer holds about 24 characters: with keep-warm
 // on, the time of the next poke stands in for the countdown.
 function desktopRow($: Engine, ui: ElementTable<'desktop'>, c: Core, r: Readout, now: number) {
   const { Box, Text, Button } = ui
@@ -154,21 +154,15 @@ function desktopRow($: Engine, ui: ElementTable<'desktop'>, c: Core, r: Readout,
   const timer = <Text {...style}>{ringGlyph(r) + ' ' + r.label + test}</Text>
   if (!hasToggle(keep, r)) return Box({ flexDirection: 'row', children: [timer] })
 
-  const isOn = keep.tone === 'on'
-  const dot = isOn ? '●' : '○'
+  // The words are the switch: pressing them turns keep-warm on or off
+  const words = footerText(keep.text + (keep.tone === 'on' ? test : ''))
   const toggler = (
-    <Button key="toggle" label={dot} plain dimColor={!isOn} onPress={() => toggle($)}>
-      {dot}
+    <Button key="toggle" label={words} plain dimColor={keep.tone !== 'on'} onPress={() => toggle($)}>
+      {words}
     </Button>
   )
-  if (keep.tone === 'off') {
-    const status = <Text dimColor>{keep.text}</Text>
-    return Box({ flexDirection: 'row', columnGap: 1, children: [toggler, status, timer] })
-  }
-  if (keep.tone === 'stopped') {
-    const status = <Text color="warning">{keep.text}</Text>
-    return Box({ flexDirection: 'row', columnGap: 1, children: [toggler, status] })
-  }
+  if (keep.tone === 'off') return Box({ flexDirection: 'row', columnGap: 1, children: [toggler, timer] })
+  if (keep.tone === 'stopped') return Box({ flexDirection: 'row', columnGap: 1, children: [toggler] })
   const editLabel = footerText('edit poke')
   const edit = (
     <Button
@@ -181,8 +175,9 @@ function desktopRow($: Engine, ui: ElementTable<'desktop'>, c: Core, r: Readout,
       {editLabel}
     </Button>
   )
-  const status = <Text color="success">{keep.text + test}</Text>
-  return Box({ flexDirection: 'row', columnGap: 1, children: [toggler, edit, status] })
+  // The app colors a footer button itself, so the "on" mark is plain red text beside it
+  const mark = <Text color="error">●</Text>
+  return Box({ flexDirection: 'row', columnGap: 1, children: [edit, toggler, mark] })
 }
 
 function redrawKey(c: Core, now: number): string {

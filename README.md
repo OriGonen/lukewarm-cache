@@ -3,8 +3,8 @@
 A small prompt-cache countdown below the prompt, with a keep-warm toggle.
 
 ```
-off    [○] keep warm? ◕ 42m   Opus 5.5 High
-on     [●] [edit ᴘoke] poke in 41m   Opus 5.5 High
+off    [keeᴘ warm?] ◕ 42m   Opus 5.5 High
+on     [edit ᴘoke] [ᴘoke in 41m] ●   Opus 5.5 High   (the ● is red)
 cold   ◌ Cold   Opus 5.5 High
 ```
 
@@ -30,13 +30,13 @@ Then start a new session. It needs nothing else. Remove Cache TTL Timer in the a
 
 ## Using it
 
-- **Toggle** (`keep warm?`): per session, off by default, and only offered while the cache is warm. Grey when off; when on the text turns green and shows the next poke's time in place of the countdown. On the desktop the dot is the button; in the terminal the words are.
+- **Toggle** (`keep warm?`): per session, off by default, and only offered while the cache is warm. Grey when off; when on it shows the next poke's time in place of the countdown (green in the terminal). The words themselves are the button, on the desktop and in the terminal: press them to turn keep-warm on or off.
 - **edit poke**: shown only while keep-warm is on. Choose **When due** (`poke` or `compact`), and edit the poke message, the seconds before expiry, and the most pokes in a row. Enter saves a field; `done` saves what's left. Settings are kept between sessions. On the desktop the editor opens above the prompt, since the footer can't hold it.
 - `/lukewarm` shows the state; `/lukewarm on`, `/lukewarm off`; `/lukewarm ttl 90` sets a short test countdown for this session (marked `*` on the desktop) and `/lukewarm ttl auto` goes back.
 
 The row appears after the session's first reply. On the desktop it takes the footer spot Cache TTL Timer uses. That's the only place below the prompt that can hold buttons, so while another mod has it, this row falls back to above the prompt.
 
-The app draws every footer button as a bubble exactly one letter tall and clips what doesn't fit, and a mod can't change that or remove the bubble. Plain text has no bubble but can't be pressed. So the words are plain text and the switch is a small dot; `edit poke` has to be a button, so it uses a look-alike letter that sits on the baseline (`ᴘ`).
+The app draws every footer button as a bubble exactly one letter tall and clips what doesn't fit, and a mod can't change that or remove the bubble. Plain text has no bubble but can't be pressed. So the toggle and `edit poke` are both buttons, and their words use look-alike letters that sit on the baseline (`ᴘ`, `ɢ`, `ʏ`). The app colors footer buttons itself, so when keep-warm is on the desktop shows a red `●` mark beside the toggle.
 
 ## Compact instead of poke
 
