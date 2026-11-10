@@ -1,6 +1,6 @@
 import { describe, expect, mock, test } from 'claude-code/testing'
 
-import { provenTtl } from '../hooks/logic'
+import { failureText, provenTtl } from '../hooks/logic'
 import type { Core } from '../types'
 
 const START = Date.parse('2026-11-08T10:00:00Z')
@@ -22,7 +22,10 @@ type World = {
   limits: { value: object[] }
 }
 
-function world(on: any, opts: { store?: Record<string, unknown>; rateLimits?: object[]; compactSkip?: string } = {}): World {
+function world(
+  on: any,
+  opts: { store?: Record<string, unknown>; rateLimits?: object[]; compactSkip?: string; manualSkip?: string } = {},
+): World {
   const clock = mock.clock(on, { now: START })
   const store: Record<string, unknown> = { ...opts.store }
   on('store.get', (_$: any, e: any) => ({ value: store[e.key] }))
@@ -49,7 +52,7 @@ function world(on: any, opts: { store?: Record<string, unknown>; rateLimits?: ob
   on('session.usage', () => ({ value: { startedAt: START, context: { tokens: 1, window: 2, percent: 50 }, rateLimits: limits.value } }))
   on('session.measure', (_$: any, e: any) => ({ changed: e.changed }))
   on('session.compact', (_$: any, e: any) => {
-    if (e.trigger === 'manual') return { messages: e.messages }
+    if (e.trigger === 'manual') return opts.manualSkip ? { skip: opts.manualSkip } : { messages: e.messages }
     compacts.count++
     return opts.compactSkip ? { skip: opts.compactSkip } : { messages: [{ role: 'user', text: 'summary', toolUses: [] }] }
   })
@@ -57,6 +60,11 @@ function world(on: any, opts: { store?: Record<string, unknown>; rateLimits?: ob
   on('prompt.submit', (_$: any, e: any) => {
     submitted.push(e.text)
     return { text: e.text }
+  })
+  // Headless keep-warm runs /compact; the engine's compaction then comes as session.compact
+  on('command.run', { command: 'compact' }, () => {
+    submitted.push('/compact')
+    return {}
   })
   on('turn.start', (_$: any, e: any) => ({ turnId: e.turnId }))
   on('turn.complete', (_$: any, e: any) => ({ text: e.answer }))
@@ -76,8 +84,9 @@ function world(on: any, opts: { store?: Record<string, unknown>; rateLimits?: ob
   return { clock, submitted, toasts, transcript, store, compacts, status, limits }
 }
 
-async function start($: any) {
-  await $.session.start({ cwd: '/work', surface: 'desktop', isInteractive: true })
+// isInteractive false: the desktop app, the SDK or -p, where compaction runs as a /compact prompt
+async function start($: any, isInteractive = true) {
+  await $.session.start({ cwd: '/work', surface: 'desktop', isInteractive })
 }
 
 const run = ($: any, args: string) =>
@@ -122,7 +131,7 @@ async function underLineOn(w: World, $: any, surface: 'terminal' | 'desktop'): P
     return w.status.text
   }
   const ui = await band($, surface)
-  const text = await textOf(ui, /^(sends|compacts|press)/)
+  const text = await textOf(ui, /^(sends|compacts|press|why)/)
   await ui.unmount()
   return text
 }
@@ -138,8 +147,8 @@ async function statusOf(ui: any): Promise<string | undefined> {
 }
 
 // A short countdown, a first real reply, and the toggle pressed
-async function warmedUp($: any, ttl = 'ttl 120') {
-  await start($)
+async function warmedUp($: any, ttl = 'ttl 120', isInteractive = true) {
+  await start($, isInteractive)
   await run($, ttl)
   await turn($, 't1', 'fix the tests')
   const ui = await footer($)
@@ -458,9 +467,70 @@ describe('lukewarm-cache', () => {
     await warmedUp($)
     await w.clock.advance(61_000)
     expect(w.compacts.count).toBe(1)
-    expect(w.toasts).toContain('Lukewarm Cache stopped: compact failed')
+    expect(w.toasts).toContain('Lukewarm Cache stopped: compact failed: not now')
+    expect((await run($, '')).text).toContain('keep-warm stopped: compact failed: not now')
     await w.clock.advance(120_000)
     expect(w.compacts.count).toBe(1)
+  })
+
+  test('compact mode: a refused compaction keeps what the engine said', async ($, on) => {
+    const w = world(on, { store: { settings: COMPACT }, compactSkip: 'Conversation too long to summarize' })
+    await warmedUp($)
+    await w.clock.advance(61_000)
+    expect(w.compacts.count).toBe(1)
+    expect(w.toasts).toContain('Lukewarm Cache stopped: compact failed: Conversation too long to summarize')
+    expect(await statusOf(await footer($))).toBe('stopped: compact failed')
+    expect(await underLineOn(w, $, 'terminal')).toBe('why: Conversation too long to summarize · press to turn back on')
+    expect(await underLineOn(w, $, 'desktop')).toBe('why: Conversation too long… · press to turn back on')
+  })
+
+  test('compact mode, headless: runs /compact and settles on its compaction', async ($, on) => {
+    const w = world(on, { store: { settings: COMPACT } })
+    await warmedUp($, 'ttl 120', false)
+    await w.clock.advance(61_000)
+    expect(w.compacts.count).toBe(0)
+    expect(w.submitted).toEqual(['/compact'])
+    expect(await statusOf(await footer($))).toBe('compacting…*')
+
+    // What the engine does with the prompt: a turn that compacts
+    await $.turn.start({ text: '/compact', turnId: 't-compact' })
+    await $.session.compact({ messages: [{ role: 'user', text: 'x', toolUses: [] }], trigger: 'manual' } as never)
+    await $.turn.complete({ answer: '', durationMs: 900, isAborted: false, turnId: 't-compact', reason: 'answer' })
+    expect(w.toasts).toEqual([])
+    expect(await statusOf(await footer($))).toBe('waits for you*')
+    await w.clock.advance(180_000)
+    expect(w.submitted).toEqual(['/compact'])
+
+    await turn($, 't2', 'carry on')
+    await w.clock.advance(61_000)
+    expect(w.submitted).toEqual(['/compact', '/compact'])
+  })
+
+  test('compact mode, headless: a refused /compact stops with what the engine said', async ($, on) => {
+    const w = world(on, { store: { settings: COMPACT }, manualSkip: 'Not enough messages to compact' })
+    await warmedUp($, 'ttl 120', false)
+    await w.clock.advance(61_000)
+    await $.session.compact({ messages: [{ role: 'user', text: 'x', toolUses: [] }], trigger: 'manual' } as never)
+    expect(w.toasts).toContain('Lukewarm Cache stopped: compact failed: Not enough messages to compact')
+    await w.clock.advance(120_000)
+    expect(w.submitted).toEqual(['/compact'])
+  })
+
+  test('compact mode, headless: a /compact that never runs stops after 10 minutes', async ($, on) => {
+    const w = world(on, { store: { settings: COMPACT } })
+    await warmedUp($, 'ttl 1h', false)
+    await w.clock.advance(3_540_000)
+    expect(w.submitted).toEqual(['/compact'])
+    await w.clock.advance(601_000)
+    expect(w.toasts).toContain('Lukewarm Cache stopped: compact failed: it never ran')
+  })
+
+  test('a stop with nothing said shows no reason', async ($, on) => {
+    const w = world(on, { store: { settings: COMPACT }, compactSkip: ' ' })
+    await warmedUp($)
+    await w.clock.advance(61_000)
+    expect(w.toasts).toContain('Lukewarm Cache stopped: compact failed')
+    expect(await underLineOn(w, $, 'terminal')).toBe('press to turn back on')
   })
 
   test('the pencil edits and saves the message, lead and limit', async ($, on) => {
@@ -597,6 +667,13 @@ describe('lukewarm-cache', () => {
     await w.clock.advance(6 * MIN)
     await turn($, 't2', 'still cached', WARM)
     expect((await run($, '')).text).toContain('TTL 3600s (detected)')
+  })
+
+  test('an error becomes one short line, and nothing said stays empty', () => {
+    expect(failureText(new Error('Request timed out\n  at fetch'))).toBe('Request timed out at fetch')
+    expect(failureText('x'.repeat(200))).toHaveLength(160)
+    expect(failureText(undefined)).toBe('')
+    expect(failureText({ code: 1 })).toBe('')
   })
 
   test('only a warm request after a long gap counts as proof of the 1 hour TTL', () => {

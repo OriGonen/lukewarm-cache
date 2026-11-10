@@ -40,6 +40,19 @@ export const STOP_TEXT: Record<StopReason, string> = {
   compactFailed: 'compact failed',
 }
 
+const DETAIL_MAX = 160
+
+// What the engine said when it refused or errored, on one short line; '' when it said nothing
+export function failureText(why: unknown): string {
+  const text = why instanceof Error ? why.message : typeof why === 'string' ? why : ''
+  return truncate(text, DETAIL_MAX)
+}
+
+// The stop reason, with what the engine said when there's something
+export function stopText(reason: StopReason, detail: string | undefined): string {
+  return detail ? `${STOP_TEXT[reason]}: ${detail}` : STOP_TEXT[reason]
+}
+
 // 47m while there's time, 0:42 in the last minute
 export function labelText(left: number): string {
   if (left <= 0) return 'Cold'

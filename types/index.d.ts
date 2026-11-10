@@ -25,6 +25,8 @@ export type Core = {
   model: string
   mode: Mode
   stopReason: StopReason
+  // What the engine said when it refused or errored; '' (or absent, from an older version) when nothing
+  stopDetail?: string
   // Pokes in a row since the last real turn
   count: number
   poke: 'none' | 'sent' | 'running' | 'compacting'

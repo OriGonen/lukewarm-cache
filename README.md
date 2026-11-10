@@ -40,7 +40,7 @@ The app draws every footer button as a bubble exactly one letter tall and clips 
 
 ## Compact instead of poke
 
-With **When due** set to `compact`, keep-warm compacts the conversation instead of sending a message, by default 3 minutes before expiry. Compacting and poking each keep their own seconds before expiry. The old context is read from the cache one last time, and what's left is small enough that a cold start later costs little. It happens once: the cache is empty afterwards, so it waits for your next real message, and the max-pokes limit doesn't apply. Compacting replaces the conversation's history with a summary, so try it in a throwaway conversation first.
+With **When due** set to `compact`, keep-warm compacts the conversation instead of sending a message, by default 3 minutes before expiry. Compacting and poking each keep their own seconds before expiry. The old context is read from the cache one last time, and what's left is small enough that a cold start later costs little. It happens once: the cache is empty afterwards, so it waits for your next real message, and the max-pokes limit doesn't apply. Compacting replaces the conversation's history with a summary, so try it in a throwaway conversation first. In the desktop app (and the SDK or `-p`), it runs `/compact` for you, since a plugin can only compact there through the command; it shows in the conversation like one you typed.
 
 ## What a poke is
 
@@ -65,6 +65,8 @@ Keep-warm switches itself off and says why, until you press the toggle:
 | `stopped: interrupted` | you interrupted a poke |
 | `stopped: poke never ran` | a sent poke hadn't started after 10 minutes |
 | `stopped: compact failed` | a compaction was refused or errored |
+
+When the engine said why a poke or compaction failed, its words follow the reason: in the toast, in `/lukewarm`, and on the line under the toggle (`why: …`).
 
 ## TTL
 

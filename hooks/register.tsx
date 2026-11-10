@@ -18,6 +18,8 @@ import {
   TEST_TTL_MIN,
   activeLead,
   cleanMessage,
+  failureText,
+  stopText,
   cleanSettings,
   footerText,
   labelText,
@@ -49,6 +51,7 @@ const INITIAL: Core = {
   model: '',
   mode: 'off',
   stopReason: 'limit',
+  stopDetail: '',
   count: 0,
   poke: 'none',
   pokeText: '',
@@ -130,7 +133,9 @@ function keepView(c: Core, r: Readout, now: number): Keep {
 
 // The short line under the timer
 function underLine(c: Core, columns: number): string | null {
-  if (c.mode === 'stopped') return 'press to turn back on'
+  if (c.mode === 'stopped') {
+    return c.stopDetail ? `why: ${truncate(c.stopDetail, Math.max(8, columns - 30))} · press to turn back on` : 'press to turn back on'
+  }
   if (c.mode !== 'on') return null
   if (c.settings.action === 'compact') return 'compacts before the cache expires'
   const sent = c.count > 0 ? ` · ${c.count} of ${c.settings.maxPokes} sent` : ''
@@ -185,28 +190,40 @@ function redrawKey(c: Core, now: number): string {
   return r ? r.level + r.step + r.label + keepView(c, r, now).text : ''
 }
 
-async function stopKeeping($: Engine, reason: StopReason): Promise<void> {
-  await patch($, { mode: 'stopped', stopReason: reason, poke: 'none', pokeTurnId: '' })
-  $.ui.toast(`Lukewarm Cache stopped: ${STOP_TEXT[reason]}`)
+// `detail` is what the engine said, kept so the reason is still there when you come back
+async function stopKeeping($: Engine, reason: StopReason, detail = ''): Promise<void> {
+  await patch($, { mode: 'stopped', stopReason: reason, stopDetail: detail, poke: 'none', pokeTurnId: '' })
+  $.ui.toast(`Lukewarm Cache stopped: ${stopText(reason, detail)}`)
 }
 
 async function firePoke($: Engine, c: Core, now: number): Promise<void> {
   const text = c.settings.message
   await patch($, { poke: 'sent', pokeText: text, pokeSentAt: now })
-  void $.prompt.submit({ text }).catch(() => stopKeeping($, 'failed'))
+  void $.prompt.submit({ text }).catch((err: unknown) => stopKeeping($, 'failed', failureText(err)))
 }
 
 // Compacts just before expiry, while the old context is still cheap to read.
 // The cache is then empty, so it holds until the next real message.
-async function fireCompact($: Engine): Promise<void> {
-  await patch($, { poke: 'compacting' })
+async function fireCompact($: Engine, now: number): Promise<void> {
+  await patch($, { poke: 'compacting', pokeSentAt: now })
+  if (!isInteractive) {
+    // The desktop app, the SDK and -p refuse $.session.compact(): compaction there
+    // runs inside a turn, as the /compact command. The session.compact hook settles it.
+    void $.command
+      .run({ command: 'compact' })
+      .catch((err: unknown) => stopKeeping($, 'compactFailed', failureText(err)))
+    return
+  }
+  // The engine leaves the calling plugin's own session.compact hook out, so it settles here
   void $.session
     .compact()
-    .then(async (done) => {
-      if ('skip' in done && done.skip) return stopKeeping($, 'compactFailed')
-      await patch($, { poke: 'none', lastHit: null, heldBy: 'compaction' })
-    })
-    .catch(() => stopKeeping($, 'compactFailed'))
+    .then((done) => settleCompact($, done))
+    .catch((err: unknown) => stopKeeping($, 'compactFailed', failureText(err)))
+}
+
+async function settleCompact($: Engine, done: { skip?: string }): Promise<void> {
+  if (done.skip) return stopKeeping($, 'compactFailed', failureText(done.skip))
+  await patch($, { poke: 'none', lastHit: null, heldBy: 'compaction' })
 }
 
 async function toggle($: Engine): Promise<void> {
@@ -315,6 +332,8 @@ async function learnFromTranscript($: Engine, path: string | null | undefined): 
 // What the ticker last drew, so it redraws only on a change
 let drawnKey = ''
 let isTicking = false
+// A person at the prompt (the terminal); false under the desktop app, the SDK and -p
+let isInteractive = true
 // Typing not yet saved with Enter; the Done button applies it
 let drafts: Partial<Record<Field, string>> = {}
 // Set once the desktop asks for its footer; until then the row stays above the prompt
@@ -354,8 +373,10 @@ async function tick($: Engine): Promise<void> {
     const now = await $.clock.now()
     if (c.poke === 'sent' && now - c.pokeSentAt > POKE_WATCHDOG_MS) {
       await stopKeeping($, 'lost')
+    } else if (c.poke === 'compacting' && now - c.pokeSentAt > POKE_WATCHDOG_MS) {
+      await stopKeeping($, 'compactFailed', 'it never ran')
     } else if (!isWaitingForTtl(c) && shouldPoke(c, now)) {
-      if (c.settings.action === 'compact') await fireCompact($)
+      if (c.settings.action === 'compact') await fireCompact($, now)
       else await firePoke($, c, now)
     }
     const latest = await read($, core)
@@ -397,7 +418,7 @@ async function statusText($: Engine): Promise<string> {
   const isCompact = c.settings.action === 'compact'
   const mode =
     c.mode === 'stopped'
-      ? `stopped: ${STOP_TEXT[c.stopReason]}`
+      ? `stopped: ${stopText(c.stopReason, c.stopDetail)}`
       : c.mode === 'on'
         ? isCompact
           ? 'on'
@@ -410,6 +431,7 @@ async function statusText($: Engine): Promise<string> {
 
 export const register: Register = (on) => {
   on('session.start', async ($, e, next) => {
+    isInteractive = e.isInteractive
     await $.command.register({
       name: 'lukewarm',
       description: 'Show the prompt cache and keep-warm state, or set a test TTL for this session',
@@ -522,10 +544,18 @@ export const register: Register = (on) => {
 
   // A compaction or /clear empties the cache: pokes wait for the next real request to write it
   on('session.compact', async ($, e, next) => {
-    const done = await next(e)
-    if (e.agentId === undefined && e.trigger !== 'precompute' && !('skip' in done && done.skip)) {
-      await hold($, 'compaction').catch(() => {})
+    if (e.agentId !== undefined || e.trigger === 'precompute') return next(e)
+    // Keep-warm's own /compact, where it has to run as a prompt
+    const isOurs = (await read($, core)).poke === 'compacting'
+    let done: Awaited<ReturnType<typeof next>>
+    try {
+      done = await next(e)
+    } catch (err) {
+      if (isOurs) await stopKeeping($, 'compactFailed', failureText(err)).catch(() => {})
+      throw err
     }
+    if (isOurs) await settleCompact($, done).catch(() => {})
+    else if (!('skip' in done && done.skip)) await hold($, 'compaction').catch(() => {})
     return done
   })
 
