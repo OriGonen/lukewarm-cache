@@ -200,6 +200,24 @@ export function shouldPoke(c: Core, now: number): boolean {
   return now < c.lastHit! + ttlOf(c)
 }
 
+// How long "compact now?" waits for a yes before it lets go
+export const ASK_MS = 10_000
+
+// Everything that has to be true for "compact now" to show: compact mode, the
+// cache still warm, and nothing running. Compacting a cold cache saves nothing.
+export function canCompactNow(c: Core, now: number): boolean {
+  if (c.mode !== 'on' || c.settings.action !== 'compact' || c.poke !== 'none' || c.isBusy) return false
+  if (c.lastHit === null || c.heldBy) return false
+  return now < c.lastHit + ttlOf(c)
+}
+
+// Seconds left on "compact now?"; null when it isn't asking
+export function askLeft(c: Core, now: number): number | null {
+  if (c.askedAt == null || !canCompactNow(c, now)) return null
+  const left = c.askedAt + ASK_MS - now
+  return left > 0 ? Math.ceil(left / 1000) : null
+}
+
 // Wrote more than it read: most of the context went back into the cache. A
 // warm poke writes only the last reply and itself.
 export function pokeWasCold(usage: { cache_creation_input_tokens?: number; cache_read_input_tokens?: number }): boolean {

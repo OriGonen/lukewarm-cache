@@ -17,6 +17,8 @@ import {
   TEST_TTL_MAX,
   TEST_TTL_MIN,
   activeLead,
+  askLeft,
+  canCompactNow,
   cleanMessage,
   failureText,
   stopText,
@@ -61,6 +63,7 @@ const INITIAL: Core = {
   heldBy: '',
   ttlOverrideMs: null,
   isEditing: false,
+  askedAt: null,
   limits: [],
   settings: DEFAULT_SETTINGS,
 }
@@ -132,7 +135,9 @@ function keepView(c: Core, r: Readout, now: number): Keep {
 }
 
 // The short line under the timer
-function underLine(c: Core, columns: number): string | null {
+function underLine(c: Core, columns: number, now: number): string | null {
+  const asking = askLeft(c, now)
+  if (asking !== null) return `replaces the history with a summary · no in ${asking}s`
   if (c.mode === 'stopped') {
     return c.stopDetail ? `why: ${truncate(c.stopDetail, Math.max(8, columns - 30))} · press to turn back on` : 'press to turn back on'
   }
@@ -168,7 +173,25 @@ function desktopRow($: Engine, ui: ElementTable<'desktop'>, c: Core, r: Readout,
   )
   if (keep.tone === 'off') return Box({ flexDirection: 'row', columnGap: 1, children: [toggler, timer] })
   if (keep.tone === 'stopped') return Box({ flexDirection: 'row', columnGap: 1, children: [toggler] })
-  const editLabel = footerText('edit poke')
+  if (askLeft(c, now) !== null) {
+    const yes = footerText('yes')
+    return Box({
+      flexDirection: 'row',
+      columnGap: 1,
+      children: [
+        <Text color="warning">{footerText('compact now?')}</Text>,
+        <Button key="yes" label={yes} plain onPress={() => confirmCompact($)}>
+          {yes}
+        </Button>,
+        <Button key="no" label="no" plain dimColor onPress={() => cancelAsk($)}>
+          no
+        </Button>,
+      ],
+    })
+  }
+  // Compact mode has no poke to edit, and the room goes to "now"
+  const isCompact = c.settings.action === 'compact'
+  const editLabel = footerText(isCompact ? 'edit' : 'edit poke')
   const edit = (
     <Button
       key="edit"
@@ -182,12 +205,17 @@ function desktopRow($: Engine, ui: ElementTable<'desktop'>, c: Core, r: Readout,
   )
   // The app colors a footer button itself, so the "on" mark is plain red text beside it
   const mark = <Text color="error">●</Text>
-  return Box({ flexDirection: 'row', columnGap: 1, children: [edit, toggler, mark] })
+  const compactNow = !canCompactNow(c, now) ? null : (
+    <Button key="now" label="now" plain dimColor onPress={() => askCompact($)}>
+      now
+    </Button>
+  )
+  return Box({ flexDirection: 'row', columnGap: 1, children: [edit, toggler, compactNow, mark] })
 }
 
 function redrawKey(c: Core, now: number): string {
   const r = readout(c, now)
-  return r ? r.level + r.step + r.label + keepView(c, r, now).text : ''
+  return r ? r.level + r.step + r.label + keepView(c, r, now).text + '|' + (askLeft(c, now) ?? '') + canCompactNow(c, now) : ''
 }
 
 // `detail` is what the engine said, kept so the reason is still there when you come back
@@ -205,7 +233,7 @@ async function firePoke($: Engine, c: Core, now: number): Promise<void> {
 // Compacts just before expiry, while the old context is still cheap to read.
 // The cache is then empty, so it holds until the next real message.
 async function fireCompact($: Engine, now: number): Promise<void> {
-  await patch($, { poke: 'compacting', pokeSentAt: now })
+  await patch($, { poke: 'compacting', pokeSentAt: now, askedAt: null })
   if (!isInteractive) {
     // The desktop app, the SDK and -p refuse $.session.compact(): compaction there
     // runs inside a turn, as the /compact command. The session.compact hook settles it.
@@ -226,10 +254,35 @@ async function settleCompact($: Engine, done: { skip?: string }): Promise<void> 
   await patch($, { poke: 'none', lastHit: null, heldBy: 'compaction' })
 }
 
+// "compact now" asks before it compacts: the summary replaces the history for good
+async function askCompact($: Engine): Promise<void> {
+  const now = await $.clock.now()
+  if (!canCompactNow(await read($, core), now)) return
+  await patch($, { askedAt: now })
+  await redraw($)
+}
+
+async function cancelAsk($: Engine): Promise<void> {
+  await patch($, { askedAt: null })
+  await redraw($)
+}
+
+// Yes: the same compaction the schedule runs, now. The question may have lapsed
+// or the cache changed since it was drawn, so it's checked again.
+async function confirmCompact($: Engine): Promise<void> {
+  const c = await read($, core)
+  const now = await $.clock.now()
+  if (askLeft(c, now) === null) return cancelAsk($)
+  await fireCompact($, now)
+  await redraw($)
+}
+
 async function toggle($: Engine): Promise<void> {
   const settings = await loadSettings($)
   await update($, core, (c) =>
-    c.mode === 'on' ? { ...c, mode: 'off' as const } : { ...c, mode: 'on' as const, count: 0, settings },
+    c.mode === 'on'
+      ? { ...c, mode: 'off' as const, askedAt: null }
+      : { ...c, mode: 'on' as const, count: 0, settings, askedAt: null },
   )
 }
 
@@ -344,7 +397,7 @@ let shownStatus: string | undefined | null = null
 // With the row in the footer, the line about what goes out is a status line
 // beside it: the Code tab draws no other text below the prompt.
 function showStatus($: Engine, c: Core, now: number): void {
-  const text = hasFooter && readout(c, now) ? (underLine(c, 52) ?? undefined) : undefined
+  const text = hasFooter && readout(c, now) ? (underLine(c, 52, now) ?? undefined) : undefined
   if (text === shownStatus) return
   shownStatus = text
   $.ui.status(text)
@@ -379,15 +432,24 @@ async function tick($: Engine): Promise<void> {
       if (c.settings.action === 'compact') await fireCompact($, now)
       else await firePoke($, c, now)
     }
-    const latest = await read($, core)
-    showStatus($, latest, now)
-    const key = redrawKey(latest, now)
-    if (key !== drawnKey) {
-      drawnKey = key
-      $.ui.invalidate('ui.render')
-    }
+    // A question nobody answered, or one the cache no longer allows, lets go
+    const after = await read($, core)
+    if (after.askedAt != null && askLeft(after, now) === null) await patch($, { askedAt: null })
+    await redraw($, now)
   } finally {
     isTicking = false
+  }
+}
+
+// Redraws the row and the status line when what they show has changed
+async function redraw($: Engine, at?: number): Promise<void> {
+  const c = await read($, core)
+  const now = at ?? (await $.clock.now())
+  showStatus($, c, now)
+  const key = redrawKey(c, now)
+  if (key !== drawnKey) {
+    drawnKey = key
+    $.ui.invalidate('ui.render')
   }
 }
 
@@ -455,6 +517,7 @@ export const register: Register = (on) => {
       isBusy: false,
       poke: 'none' as const,
       pokeTurnId: '',
+      askedAt: null,
     }))
     try {
       await learnFromTranscript($, await transcriptPath($))
@@ -506,8 +569,8 @@ export const register: Register = (on) => {
     if (e.agentId === undefined) {
       await update($, core, (c) =>
         c.poke === 'sent' && e.text.includes(c.pokeText)
-          ? { ...c, isBusy: true, poke: 'running' as const, pokeTurnId: e.turnId }
-          : { ...c, isBusy: true, count: 0 },
+          ? { ...c, isBusy: true, poke: 'running' as const, pokeTurnId: e.turnId, askedAt: null }
+          : { ...c, isBusy: true, count: 0, askedAt: null },
       )
     }
     return next(e)
@@ -622,14 +685,18 @@ export const register: Register = (on) => {
       const name = c.model && columns >= 44 ? modelName(c.model) + ' · ' : ''
       const test = c.ttlOverrideMs === null ? '' : ' (test TTL)'
       const keep = keepView(c, r, now)
-      rows.push(
-        Box({
-          flexDirection: 'row',
-          alignItems: 'center',
-          columnGap: 1,
-          children: [
-            <Text {...style}>{ringGlyph(r)}</Text>,
-            <Text {...style}>{name + r.label + test}</Text>,
+      const isAsking = askLeft(c, now) !== null
+      const controls = isAsking
+        ? [
+            <Text color="warning">compact now?</Text>,
+            <Button key="yes" label="yes" plain onPress={() => confirmCompact($)}>
+              <Text color="warning">yes</Text>
+            </Button>,
+            <Button key="no" label="no" plain dimColor onPress={() => cancelAsk($)}>
+              no
+            </Button>,
+          ]
+        : [
             !hasToggle(keep, r) ? null : keep.tone === 'off' ? (
               <Button key="toggle" label={keep.text} plain dimColor onPress={() => toggle($)}>
                 {keep.text}
@@ -650,12 +717,23 @@ export const register: Register = (on) => {
                 edit poke
               </Button>
             ),
-          ],
+            !canCompactNow(c, now) ? null : (
+              <Button key="now" label="compact now" plain dimColor onPress={() => askCompact($)}>
+                compact now
+              </Button>
+            ),
+          ]
+      rows.push(
+        Box({
+          flexDirection: 'row',
+          alignItems: 'center',
+          columnGap: 1,
+          children: [<Text {...style}>{ringGlyph(r)}</Text>, <Text {...style}>{name + r.label + test}</Text>, ...controls],
         }),
       )
     }
 
-    const under = isInFooter || c.isEditing ? null : underLine(c, columns)
+    const under = isInFooter || c.isEditing ? null : underLine(c, columns, now)
     if (under) rows.push(<Text dimColor>{under}</Text>)
 
     if (c.isEditing) {

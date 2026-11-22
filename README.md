@@ -42,6 +42,8 @@ The app draws every footer button as a bubble exactly one letter tall and clips 
 
 With **When due** set to `compact`, keep-warm compacts the conversation instead of sending a message, by default 3 minutes before expiry. Compacting and poking each keep their own seconds before expiry. The old context is read from the cache one last time, and what's left is small enough that a cold start later costs little. It happens once: the cache is empty afterwards, so it waits for your next real message, and the max-pokes limit doesn't apply. Compacting replaces the conversation's history with a summary, so try it in a throwaway conversation first. In the desktop app (and the SDK or `-p`), it runs `/compact` for you, since a plugin can only compact there through the command; it shows in the conversation like one you typed.
 
+In compact mode the row also has **compact now** (just **now** in the desktop footer, where **edit poke** shortens to **edit** to make room). It compacts right away instead of waiting for the schedule, after asking `compact now? yes / no`. The question goes away after 10 seconds or when you send a message. It shows only while keep-warm is on, the cache is warm and nothing is running, and it ends the same way as the scheduled compact: keep-warm waits for your next message.
+
 ## What a poke is
 
 A poke is a real turn: it's visible in the conversation, uses your plan's usage, and needs the session open and the computer awake. It goes out only when all of these hold:
