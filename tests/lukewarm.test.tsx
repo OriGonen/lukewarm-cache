@@ -1,6 +1,6 @@
 import { describe, expect, mock, test } from 'claude-code/testing'
 
-import { failureText, provenTtl } from '../hooks/logic'
+import { ASK_MS, canCompactNow, failureText, provenTtl } from '../hooks/logic'
 import type { Core } from '../types'
 
 const START = Date.parse('2026-11-08T10:00:00Z')
@@ -157,6 +157,54 @@ async function warmedUp($: any, ttl = 'ttl 120', isInteractive = true) {
 }
 
 const COMPACT = { message: POKE, leadSeconds: 60, compactLeadSeconds: 60, maxPokes: 3, action: 'compact' }
+
+// Buttons are found by the words on them, which differ by surface
+const WORDS = {
+  terminal: { now: 'compact now', yes: 'yes', no: 'no', ask: 'compact now?', edit: 'edit poke' },
+  desktop: { now: 'now', yes: 'ʏes', no: 'no', ask: 'comᴘact now?', edit: 'edit' },
+} as const
+const ASKING = /^replaces the history with a summary · no in \d+s$/
+
+async function button(ui: any, label: string) {
+  return ui.find({ type: 'Button', text: new RegExp(`^${label}$`) })
+}
+
+async function pressWord(ui: any, label: string) {
+  const found = await button(ui, label)
+  expect(found).toBeDefined()
+  await ui.press(found)
+}
+
+// Compact mode, warm, and well before the compaction is due (lead 60s of a 120s TTL)
+async function compactWarm($: any, surface: 'terminal' | 'desktop') {
+  await warmedUp($, 'ttl 120', surface === 'terminal')
+}
+
+// What the engine does with a headless /compact prompt: a turn that compacts
+async function engineCompacts($: any) {
+  await $.turn.start({ text: '/compact', turnId: 't-compact' })
+  await $.session.compact({ messages: [{ role: 'user', text: 'x', toolUses: [] }], trigger: 'manual' } as never)
+  await $.turn.complete({ answer: '', durationMs: 900, isAborted: false, turnId: 't-compact', reason: 'answer' })
+}
+
+// How many compactions went out, whichever way the surface runs them
+function compactions(w: World, surface: 'terminal' | 'desktop'): number {
+  return surface === 'terminal' ? w.compacts.count : w.submitted.filter((t) => t === '/compact').length
+}
+
+// The line under the row while asking: the terminal's own line, the desktop's status
+async function askLine(w: World, $: any, surface: 'terminal' | 'desktop'): Promise<string | undefined> {
+  if (surface === 'desktop') {
+    const row = await footer($)
+    await row.unmount()
+    await w.clock.advance(1_000)
+    return w.status.text
+  }
+  const ui = await band($, surface)
+  const text = await textOf(ui, /^replaces/)
+  await ui.unmount()
+  return text
+}
 
 describe('lukewarm-cache', () => {
   test('draws nothing before the first reply', async ($, on) => {
@@ -531,6 +579,302 @@ describe('lukewarm-cache', () => {
     await w.clock.advance(61_000)
     expect(w.toasts).toContain('Lukewarm Cache stopped: compact failed')
     expect(await underLineOn(w, $, 'terminal')).toBe('press to turn back on')
+  })
+
+  for (const surface of SURFACES) {
+    const words = WORDS[surface]
+
+    test(`${surface}: compact now shows only in compact mode, while warm and idle`, async ($, on) => {
+      const w = world(on, { store: { settings: COMPACT } })
+      await compactWarm($, surface)
+      const ui = await rowOn($, surface)
+      expect(await button(ui, words.now)).toBeDefined()
+      expect(await textOf(ui, /\?$/)).not.toMatch(/compact now\?|comᴘact now\?/)
+      await ui.unmount()
+
+      // Keep-warm off
+      const off = await rowOn($, surface)
+      await off.press({ key: 'toggle' })
+      expect(await button(off, words.now)).toBeUndefined()
+      await off.press({ key: 'toggle' })
+      expect(await button(off, words.now)).toBeDefined()
+      await off.unmount()
+
+      // A turn running
+      await $.turn.start({ text: 'working', turnId: 't2' })
+      const busy = await rowOn($, surface)
+      expect(await button(busy, words.now)).toBeUndefined()
+      await busy.unmount()
+      await $.turn.complete({ answer: '', durationMs: 1, isAborted: false, turnId: 't2', reason: 'answer' })
+      expect(w.submitted).toEqual([])
+      expect(w.compacts.count).toBe(0)
+    })
+
+    test(`${surface}: no compact now in poke mode`, async ($, on) => {
+      world(on)
+      await compactWarm($, surface)
+      const ui = await rowOn($, surface)
+      expect(await ui.find({ key: 'edit' })).toBeDefined()
+      expect(await button(ui, words.now)).toBeUndefined()
+      await ui.unmount()
+    })
+
+    test(`${surface}: no compact now once the cache has expired, or after a compaction`, async ($, on) => {
+      const w = world(on, { store: { settings: COMPACT } })
+      await compactWarm($, surface)
+      // Expires during a long turn, so the scheduled compaction never runs
+      await $.turn.start({ text: 'a long one', turnId: 't2' })
+      await w.clock.advance(130_000)
+      await $.turn.complete({ answer: '', durationMs: 1, isAborted: false, turnId: 't2', reason: 'answer' })
+      const cold = await rowOn($, surface)
+      expect(await button(cold, words.now)).toBeUndefined()
+      await cold.unmount()
+
+      // Warm again, then the scheduled compaction goes out: nothing to compact now while it runs
+      await turn($, 't3', 'back again')
+      await w.clock.advance(61_000)
+      expect(compactions(w, surface)).toBe(1)
+      const compacting = await rowOn($, surface)
+      expect(await button(compacting, words.now)).toBeUndefined()
+      await compacting.unmount()
+      if (surface === 'desktop') await engineCompacts($)
+      const held = await rowOn($, surface)
+      expect(await button(held, words.now)).toBeUndefined()
+      await held.unmount()
+    })
+
+    test(`${surface}: pressing compact now asks first, and nothing compacts yet`, async ($, on) => {
+      const w = world(on, { store: { settings: COMPACT } })
+      await compactWarm($, surface)
+      const ui = await rowOn($, surface)
+      await pressWord(ui, words.now)
+      expect(await textOf(ui, new RegExp(`^${words.ask.replace('?', '\\?')}$`))).toBe(words.ask)
+      expect(await button(ui, words.yes)).toBeDefined()
+      expect(await button(ui, words.no)).toBeDefined()
+      // The row is a question now: no switch, edit or second compact now
+      expect(await ui.find({ key: 'toggle' })).toBeUndefined()
+      expect(await ui.find({ key: 'edit' })).toBeUndefined()
+      expect(await button(ui, words.now)).toBeUndefined()
+      await ui.unmount()
+      if (surface === 'terminal') expect(await askLine(w, $, surface)).toBe('replaces the history with a summary · no in 10s')
+      else expect(await askLine(w, $, surface)).toMatch(ASKING)
+      expect(compactions(w, surface)).toBe(0)
+    })
+
+    test(`${surface}: the question counts down`, async ($, on) => {
+      const w = world(on, { store: { settings: COMPACT } })
+      await compactWarm($, surface)
+      const ui = await rowOn($, surface)
+      await pressWord(ui, words.now)
+      await ui.unmount()
+      await w.clock.advance(3_000)
+      expect(await askLine(w, $, surface)).toMatch(/no in [4-7]s$/)
+    })
+
+    test(`${surface}: yes compacts once and then waits for you`, async ($, on) => {
+      const w = world(on, { store: { settings: COMPACT } })
+      await compactWarm($, surface)
+      const ui = await rowOn($, surface)
+      await pressWord(ui, words.now)
+      await pressWord(ui, words.yes)
+      await ui.unmount()
+      if (surface === 'desktop') {
+        expect(w.submitted).toEqual(['/compact'])
+        expect(w.compacts.count).toBe(0)
+        await engineCompacts($)
+      } else {
+        expect(w.compacts.count).toBe(1)
+        expect(w.submitted).toEqual([])
+      }
+      await w.clock.advance(5_000)
+      const after = await footer($)
+      expect(await statusOf(after)).toBe('waits for you*')
+      await after.unmount()
+      const row = await rowOn($, surface)
+      expect(await button(row, words.now)).toBeUndefined()
+      expect(await button(row, words.yes)).toBeUndefined()
+      await row.unmount()
+      // And not again by itself
+      await w.clock.advance(180_000)
+      expect(compactions(w, surface)).toBe(1)
+    })
+
+    test(`${surface}: no compacts nothing and brings the row back`, async ($, on) => {
+      const w = world(on, { store: { settings: COMPACT } })
+      await compactWarm($, surface)
+      const ui = await rowOn($, surface)
+      await pressWord(ui, words.now)
+      await pressWord(ui, words.no)
+      expect(await button(ui, words.yes)).toBeUndefined()
+      expect(await ui.find({ key: 'toggle' })).toBeDefined()
+      expect(await button(ui, words.now)).toBeDefined()
+      await ui.unmount()
+      await w.clock.advance(15_000)
+      expect(compactions(w, surface)).toBe(0)
+      expect(await askLine(w, $, surface)).not.toMatch(ASKING)
+    })
+
+    test(`${surface}: the question lets go after 10 seconds, with nothing compacted`, async ($, on) => {
+      const w = world(on, { store: { settings: COMPACT } })
+      await compactWarm($, surface)
+      const ui = await rowOn($, surface)
+      await pressWord(ui, words.now)
+      await w.clock.advance(ASK_MS - 2_000)
+      expect(await button(ui, words.yes)).toBeDefined()
+      await w.clock.advance(3_000)
+      await ui.unmount()
+      const after = await rowOn($, surface)
+      expect(await button(after, words.yes)).toBeUndefined()
+      expect(await textOf(after, /compact now\?|comᴘact now\?/)).toBeUndefined()
+      expect(await button(after, words.now)).toBeDefined()
+      expect(await after.find({ key: 'toggle' })).toBeDefined()
+      await after.unmount()
+      expect(compactions(w, surface)).toBe(0)
+    })
+
+    test(`${surface}: a new turn drops the question`, async ($, on) => {
+      const w = world(on, { store: { settings: COMPACT } })
+      await compactWarm($, surface)
+      const ui = await rowOn($, surface)
+      await pressWord(ui, words.now)
+      await ui.unmount()
+      await $.turn.start({ text: 'one more thing', turnId: 't2' })
+      const busy = await rowOn($, surface)
+      expect(await button(busy, words.yes)).toBeUndefined()
+      await busy.unmount()
+      await step($, 't2')
+      await $.turn.complete({ answer: 'okay', durationMs: 900, isAborted: false, turnId: 't2', reason: 'answer', usage: WARM })
+      const after = await rowOn($, surface)
+      expect(await button(after, words.yes)).toBeUndefined()
+      expect(await textOf(after, /compact now\?|comᴘact now\?/)).toBeUndefined()
+      expect(await button(after, words.now)).toBeDefined()
+      await after.unmount()
+      await w.clock.advance(15_000)
+      expect(compactions(w, surface)).toBe(0)
+    })
+
+    test(`${surface}: the question drops when the cache stops qualifying`, async ($, on) => {
+      const w = world(on, { store: { settings: COMPACT } })
+      await compactWarm($, surface)
+      // Keep-warm turned off
+      const ui = await rowOn($, surface)
+      await pressWord(ui, words.now)
+      await ui.unmount()
+      await run($, 'off')
+      await w.clock.advance(2_000)
+      const off = await rowOn($, surface)
+      expect(await button(off, words.yes)).toBeUndefined()
+      expect(await button(off, words.now)).toBeUndefined()
+      await off.unmount()
+      // Back on, it is a fresh button, not the old question
+      await run($, 'on')
+      const on2 = await rowOn($, surface)
+      expect(await button(on2, words.yes)).toBeUndefined()
+      expect(await button(on2, words.now)).toBeDefined()
+      await on2.unmount()
+      expect(compactions(w, surface)).toBe(0)
+    })
+
+    test(`${surface}: a refused compaction on yes stops with compact failed`, async ($, on) => {
+      const w = world(on, { store: { settings: COMPACT }, compactSkip: 'not now', manualSkip: 'not now' })
+      await compactWarm($, surface)
+      const ui = await rowOn($, surface)
+      await pressWord(ui, words.now)
+      await pressWord(ui, words.yes)
+      await ui.unmount()
+      if (surface === 'desktop') {
+        expect(w.submitted).toEqual(['/compact'])
+        await $.session.compact({ messages: [{ role: 'user', text: 'x', toolUses: [] }], trigger: 'manual' } as never)
+      } else {
+        expect(w.compacts.count).toBe(1)
+      }
+      expect(w.toasts).toContain('Lukewarm Cache stopped: compact failed: not now')
+      expect(await statusOf(await footer($))).toBe('stopped: compact failed')
+      await w.clock.advance(120_000)
+      expect(compactions(w, surface)).toBe(1)
+    })
+  }
+
+  test('desktop: the edit button says "edit" in compact mode', async ($, on) => {
+    world(on, { store: { settings: COMPACT } })
+    await warmedUp($)
+    const ui = await footer($)
+    expect((await ui.find({ key: 'edit' }))?.props.label).toBe('edit')
+    await ui.unmount()
+  })
+
+  test('desktop: the edit button stays "edit ᴘoke" in poke mode', async ($, on) => {
+    world(on)
+    await warmedUp($)
+    const ui = await footer($)
+    expect((await ui.find({ key: 'edit' }))?.props.label).toBe('edit ᴘoke')
+    expect(await button(ui, 'now')).toBeUndefined()
+    await ui.unmount()
+  })
+
+  test('terminal: the edit button keeps "edit poke" in compact mode', async ($, on) => {
+    world(on, { store: { settings: COMPACT } })
+    await warmedUp($)
+    const ui = await band($, 'terminal')
+    expect((await ui.find({ key: 'edit' }))?.props.label).toBe('edit poke')
+    expect(await button(ui, 'compact now')).toBeDefined()
+    await ui.unmount()
+  })
+
+  test('desktop footer, compact mode: edit, comᴘact, now and the red mark, all on the baseline', async ($, on) => {
+    world(on, { store: { settings: COMPACT } })
+    await warmedUp($)
+    const ui = await footer($)
+    const edit = (await ui.find({ key: 'edit' }))?.props.label
+    const toggle = (await toggleLabel(ui)) ?? ''
+    const now = (await button(ui, 'now'))?.props.label
+    expect(edit).toBe('edit')
+    expect(toggle).toMatch(/^comᴘact /)
+    expect(now).toBe('now')
+    for (const word of [edit, toggle, now]) expect(word).not.toMatch(/[gjpqy]/)
+    expect((await ui.find({ type: 'Text', text: /^●$/ }))?.props.color).toBe('error')
+    await ui.unmount()
+  })
+
+  test('desktop footer, asking: ʏes and no, and the question, all on the baseline', async ($, on) => {
+    world(on, { store: { settings: COMPACT } })
+    await warmedUp($)
+    const ui = await footer($)
+    await pressWord(ui, 'now')
+    const question = (await textOf(ui, /now\?$/)) ?? ''
+    const yes = (await button(ui, 'ʏes'))?.props.label
+    const no = (await button(ui, 'no'))?.props.label
+    expect(question).toBe('comᴘact now?')
+    expect(yes).toBe('ʏes')
+    expect(no).toBe('no')
+    for (const word of [question, yes, no]) expect(word).not.toMatch(/[gjpqy]/)
+    await ui.unmount()
+  })
+
+  test('canCompactNow: compact mode, warm, idle and not held', () => {
+    const base = {
+      mode: 'on',
+      lastHit: START,
+      detectedTtlMs: 5 * MIN,
+      ttlOverrideMs: null,
+      poke: 'none',
+      isBusy: false,
+      heldBy: '',
+      settings: { ...COMPACT },
+    } as unknown as Core
+    expect(canCompactNow(base, START + MIN)).toBe(true)
+    expect(canCompactNow(base, START + 5 * MIN + 1)).toBe(false)
+    expect(canCompactNow({ ...base, mode: 'off' }, START + MIN)).toBe(false)
+    expect(canCompactNow({ ...base, mode: 'stopped' }, START + MIN)).toBe(false)
+    expect(canCompactNow({ ...base, settings: { ...COMPACT, action: 'poke' } } as Core, START + MIN)).toBe(false)
+    expect(canCompactNow({ ...base, isBusy: true }, START + MIN)).toBe(false)
+    expect(canCompactNow({ ...base, poke: 'compacting' }, START + MIN)).toBe(false)
+    expect(canCompactNow({ ...base, heldBy: 'compaction' }, START + MIN)).toBe(false)
+    expect(canCompactNow({ ...base, lastHit: null }, START + MIN)).toBe(false)
+  })
+
+  test('the question waits 10 seconds', () => {
+    expect(ASK_MS).toBe(10_000)
   })
 
   test('the pencil edits and saves the message, lead and limit', async ($, on) => {
