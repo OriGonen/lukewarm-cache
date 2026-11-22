@@ -39,6 +39,8 @@ export type Core = {
   // Set by /lukewarm ttl for this session only; moves the countdown, not the server
   ttlOverrideMs: number | null
   isEditing: boolean
+  // When "compact now" was pressed, while it asks to be sure; null (or absent, from an older version) otherwise
+  askedAt?: number | null
   limits: Limit[]
   settings: Settings
 }
