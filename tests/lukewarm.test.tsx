@@ -491,7 +491,8 @@ describe('lukewarm-cache', () => {
     await warmedUp($)
     await w.clock.advance(18_000)
     const early = await footer($)
-    expect(await statusOf(early)).toBe('compact 0:42*')
+    // Beside "now" the footer has room only for the time
+    expect(await statusOf(early)).toBe('in 0:42*')
     await early.unmount()
     expect(await underLineOn(w, $, 'desktop')).toBe('compacts before the cache expires')
 
@@ -821,7 +822,7 @@ describe('lukewarm-cache', () => {
     await ui.unmount()
   })
 
-  test('desktop footer, compact mode: edit, comᴘact, now and the red mark, all on the baseline', async ($, on) => {
+  test('desktop footer, compact mode: edit, now, the time and the red mark, all on the baseline', async ($, on) => {
     world(on, { store: { settings: COMPACT } })
     await warmedUp($)
     const ui = await footer($)
@@ -829,8 +830,10 @@ describe('lukewarm-cache', () => {
     const toggle = (await toggleLabel(ui)) ?? ''
     const now = (await button(ui, 'now'))?.props.label
     expect(edit).toBe('edit')
-    expect(toggle).toMatch(/^comᴘact /)
+    expect(toggle).toMatch(/^in \d/)
     expect(now).toBe('now')
+    // The footer clips past about two bubbles' worth of "edit ᴘoke" and "ᴘoke in 41m"
+    expect([edit, now, toggle, '●'].join(' ').length).toBeLessThan('edit ᴘoke ᴘoke in 41m ●'.length - 4)
     for (const word of [edit, toggle, now]) expect(word).not.toMatch(/[gjpqy]/)
     expect((await ui.find({ type: 'Text', text: /^●$/ }))?.props.color).toBe('error')
     await ui.unmount()
