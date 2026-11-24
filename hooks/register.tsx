@@ -164,8 +164,12 @@ function desktopRow($: Engine, ui: ElementTable<'desktop'>, c: Core, r: Readout,
   const timer = <Text {...style}>{ringGlyph(r) + ' ' + r.label + test}</Text>
   if (!hasToggle(keep, r)) return Box({ flexDirection: 'row', children: [timer] })
 
+  // With "now" beside it there's no room for "compact 56m": the footer clips the
+  // rest into an ellipsis that can't be pressed. The status line says it compacts.
+  const isNowShown = keep.tone === 'on' && canCompactNow(c, now) && askLeft(c, now) === null
+  const text = isNowShown ? keep.text.replace(/^compact due$/, 'due').replace(/^compact /, 'in ') : keep.text
   // The words are the switch: pressing them turns keep-warm on or off
-  const words = footerText(keep.text + (keep.tone === 'on' ? test : ''))
+  const words = footerText(text + (keep.tone === 'on' ? test : ''))
   const toggler = (
     <Button key="toggle" label={words} plain dimColor={keep.tone !== 'on'} onPress={() => toggle($)}>
       {words}
@@ -205,12 +209,14 @@ function desktopRow($: Engine, ui: ElementTable<'desktop'>, c: Core, r: Readout,
   )
   // The app colors a footer button itself, so the "on" mark is plain red text beside it
   const mark = <Text color="error">●</Text>
-  const compactNow = !canCompactNow(c, now) ? null : (
+  if (!isNowShown) return Box({ flexDirection: 'row', columnGap: 1, children: [edit, toggler, mark] })
+  // "now" before the time, so the row reads "now · in 56m"
+  const compactNow = (
     <Button key="now" label="now" plain dimColor onPress={() => askCompact($)}>
       now
     </Button>
   )
-  return Box({ flexDirection: 'row', columnGap: 1, children: [edit, toggler, compactNow, mark] })
+  return Box({ flexDirection: 'row', columnGap: 1, children: [edit, compactNow, toggler, mark] })
 }
 
 function redrawKey(c: Core, now: number): string {
